@@ -124,7 +124,7 @@ namespace ChatClient
                 while (isOpened == true)
                 {
                     // 1. 서버에게 패킷 받기
-                    byte[] buffer = new byte[1024];
+                    byte[] buffer = new byte[2048];
                     int receiveCount = serverSock.Receive(buffer);
                     string data = Encoding.UTF8.GetString(buffer, 0, receiveCount);
 
@@ -141,6 +141,10 @@ namespace ChatClient
 
                         case PacketType.S2C_Whisper: // 귓속말 전달
                             HandleWhisper(data);
+                            break;
+
+                        case PacketType.S2C_RoomChat: // 방 채팅 전달
+                            HandleRoomChat(data);
                             break;
 
                         default:
@@ -175,25 +179,36 @@ namespace ChatClient
                     Packet packet;
                     if (strLine.StartsWith('/') == true) // 명령어를 입력받았을 경우
                     {
-                        if (strLine.Length > 1 && strLine[1] == ' ')
+                        // a. /나가기 관련 명령어인지 확인
+                        if (strLine.StartsWith("/exit") == true || strLine.StartsWith("/e") == true || strLine.StartsWith("/ㄷ") == true || strLine.StartsWith("/나가기") == true) // 나가기 명령어일 경우, 탈출
+                        {
+                            isOpened = false;
+                            break;
+                        }
+                        
+                        string[] parts = strLine.Substring(1).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+                        // b. 잘못된 명령어인지 확인
+                        if (parts.Length == 0)
                         {
                             Console.WriteLine("[시스템] 잘못된 명령어입니다. (/h)");
 
                             continue;
                         }
 
-                        if (strLine.StartsWith("/exit") == true || strLine.StartsWith("/e") == true || strLine.StartsWith("/ㄷ") == true || strLine.StartsWith("/나가기") == true) // 나가기 명령어일 경우, 탈출
-                        {
-                            isOpened = false;
-                            break;
-                        }
-
-                        string[] parts = strLine.Substring(1).Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-                        string command = parts[0]; // '/'를 제외한 명령어 부분
+                        // c. 명령어 부분과 인자 부분 구분
+                        string command = parts[0].ToLower(); // '/'를 제외한 명령어 부분
                         string[] args = parts.Skip(1).ToArray(); // 명령어 부분을 제외한 나머지 인자 부분
 
-                        packet = new C2S_Cmd(command, args);
+                        // d. /방 관련 명령어인지 확인
+                        if (command.Equals("방") == true || command.Equals("room") == true) // /방 명령어일 경우
+                        {
+                            packet = HandleRoom(args);
+                        }
+                        else // 그 외의 명령어일 경우
+                        {
+                            packet = new C2S_Cmd(command, args);
+                        }
                     }
                     else // 채팅을 입력했을 경우
                     {
@@ -205,7 +220,7 @@ namespace ChatClient
                     byte[] buffer = Encoding.UTF8.GetBytes(json);
                     serverSock.Send(buffer);
                 } // while 문
-            }
+            } // try 문
             catch (SocketException ex)
             {
                 Console.WriteLine("서버와의 연결이 끊겼습니다.");
@@ -232,6 +247,126 @@ namespace ChatClient
 
             // 2. 귓속말 출력
             Console.WriteLine($"[귓속말] {result.Target} {(result.IsSelf == true ? "<<" : ">>")} {result.Text}");
+        }
+
+        private static void HandleRoomChat(string data) // 전달받은 방 채팅을 출력해주는 함수
+        {
+            // 1. 패킷 파싱
+            S2C_RoomChat? result = JsonConvert.DeserializeObject<S2C_RoomChat>(data);
+
+            if (result == null) return;
+
+            // 2. 채팅 출력
+            Console.WriteLine($"[{result.RoomName}] [{result.Sender}] {result.Text}");
+        }
+
+        private static C2S_RoomCmd HandleRoom(string[] args)
+        {
+            C2S_RoomCmd packet;
+            string roomName;
+
+            // 1. 첫번째 부분 확인
+            if (args.Length == 0 || args[0] == "") // 인자가 없을 경우, /방 도움말과 같은 명령어 취급
+            {
+                packet = new C2S_RoomCmd(RoomActionType.Help);
+                return packet;
+            }
+
+            switch (args[0].ToLower())
+            {
+                case "도움말": // 방 도움말 명령어
+                case "help":
+                    packet = new C2S_RoomCmd(RoomActionType.Help);
+                    return packet;
+
+                case "수락": // 방 초대 수락 명령어
+                case "accept":
+                    packet = new C2S_RoomCmd(RoomActionType.Accept);
+                    return packet;
+
+                case "거절": // 방 초대 거절 명령어
+                case "deny":
+                    packet = new C2S_RoomCmd(RoomActionType.Deny);
+                    return packet;
+
+                case "목록": // 공개된 방 목록 확인 명령어
+                case "list":
+                    packet = new C2S_RoomCmd(RoomActionType.List);
+                    return packet;
+
+                default: // 위 명령어가 아닐 경우, <이름> 부분이 필요한 명령어이므로 방 이름 저장
+                    roomName = args[0];
+                    break;
+            }
+
+            // 2. 두번째 부분 확인
+            if (args.Length < 2 || args[1] == "") // 인자가 없을 경우, /방 <이름>(토글 채팅) 명령어 처리
+            {
+                packet = new C2S_RoomCmd(RoomActionType.ToggleChat, roomName);
+                return packet;
+            }
+
+            switch (args[1].ToLower())
+            {
+                case "정보":
+                case "info":
+                    packet = new C2S_RoomCmd(RoomActionType.Info, roomName);
+                    return packet;
+
+                case "생성": // /방 <이름> 생성 명령어
+                case "create":
+                    packet = new C2S_RoomCmd(RoomActionType.Create, roomName);
+                    return packet;
+
+                case "명단": // /방 <이름> 명단 명령어
+                case "members":
+                    packet = new C2S_RoomCmd(RoomActionType.Members, roomName);
+                    return packet;
+
+                case "참가": // /방 <이름> 참가 명령어
+                case "join":
+                    packet = new C2S_RoomCmd(RoomActionType.Join, roomName);
+                    return packet;
+
+                case "나가기": // /방 <이름> 나가기 명령어
+                case "quit":
+                    packet = new C2S_RoomCmd(RoomActionType.Quit, roomName);
+                    return packet;
+
+                case "초대": // /방 <이름> 초대 <이름> 명령어
+                case "invite":
+                    packet = new C2S_RoomCmd(RoomActionType.Invite, roomName, string.Join(" ", args.Skip(2)));
+                    return packet;
+
+                case "추방": // /방 <이름> 추방 <이름> 명령어
+                case "kick":
+                    packet = new C2S_RoomCmd(RoomActionType.Kick, roomName, string.Join(" ", args.Skip(2)));
+                    return packet;
+
+                case "공개설정": // /방 <이름> 공개설정 [공개/비공개] 명령어
+                case "privacy":
+                    packet = new C2S_RoomCmd(RoomActionType.Privacy, roomName, string.Join(" ", args.Skip(2)).ToLower());
+                    return packet;
+
+                case "방장위임": // /방 <이름> 방장위임 <유저> 명령어
+                case "delegate":
+                    packet = new C2S_RoomCmd(RoomActionType.Delegate, roomName, string.Join(" ", args.Skip(2)));
+                    return packet;
+
+                case "설명": // /방 <이름> 설명 <설명> 명령어
+                case "settopic":
+                    packet = new C2S_RoomCmd(RoomActionType.SetTopic, roomName, string.Join(" ", args.Skip(2)));
+                    return packet;
+
+                case "이름변경": // /방 <이름> 이름변경 <이름2> 명령어
+                case "rename":
+                    packet = new C2S_RoomCmd(RoomActionType.Rename, roomName, string.Join(" ", args.Skip(2)));
+                    return packet;
+
+                default: // /방 <이름> <메세지> 명령어
+                    packet = new C2S_RoomCmd(RoomActionType.Chat, roomName, string.Join(" ", args.Skip(1)));
+                    return packet;
+            }
         }
     }
 }

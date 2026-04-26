@@ -14,8 +14,7 @@
                     string logText = $"[{DateTime.Now.ToString("HH:mm:ss")}] {message}\n";
                     Console.Write(logText);
 
-                    File.AppendAllText($"{fileName}-{DateTime.Now.ToString("yyyy-MM-dd")}.txt", logText);
-
+                    File.AppendAllText($"{fileName}-{DateTime.Now.ToString("yyyy-MM-dd")}.txt", logText); // chatlog-yyyy-MM-dd.txt 방식으로 저장. 다음 날짜가 되면 자동으로 다음날 텍스트 파일을 생성하여 저장
                 }
                 catch (Exception ex)
                 {

@@ -1,4 +1,6 @@
-﻿namespace ServerCore
+﻿using System.Text.Json.Serialization;
+
+namespace ServerCore
 {
     public enum PacketType // 패킷 타입 열거형
     {
@@ -12,8 +14,35 @@
 
         C2S_Cmd = 5, // 클라이언트 -> 서버 : 명령어 입력
         S2C_Whisper = 6, // 서버 -> 클라이언트 : 귓속말 전달
-        S2C_Room = 7 // 서버 -> 클라이언트 : 방관련 전달
-        
+
+        C2S_RoomCmd = 7, // 클라이언트 -> 서버 : 방 명령어 입력
+        S2C_RoomChat = 8 // 서버 -> 클라이언트 : 방 전용 채팅 전달
+    }
+
+    public enum RoomActionType // 방 명령어 행동 타입 열거형
+    {
+        Help = 0, // /방 도움말
+
+        Accept = 1, // /방 수락
+        Deny = 2, // /방 거절
+
+        List = 3, // /방 목록
+
+        ToggleChat = 4, // /방 <이름>
+        Chat = 5, // /방 <이름> <메세지>
+
+        Info = 6,
+        Create = 7, // /방 <이름> 생성
+        Members = 8, // /방 <이름> 명단
+        Join = 9, // /방 <이름> 참가
+        Quit = 10, // /방 <이름> 탈퇴
+
+        Invite = 11, // /방 <이름> 초대 <유저>
+        Kick = 12, // /방 <이름> 추방 <유저>
+        Privacy = 13, // /방 <이름> 공개설정 [공개/비공개]
+        Delegate = 14, // /방 <이름> 방장위임 <유저>
+        SetTopic = 15, // /방 <이름> 설명 <내용>
+        Rename = 16 // /방 <이름> 이름변경 <이름2>
     }
 
     public abstract class Packet // 패킷 추상 클래스.
@@ -101,6 +130,52 @@
             this.Target = target;
             this.Text = text;
             this.IsSelf = isSelf;
+        }
+    }
+
+    public class C2S_RoomCmd : Packet // 방 명령어 패킷
+    {
+        public int RoomActionType; // 명령어 종류 구분용 열거형
+        public string RoomName; // 방 이름 (필요 없을 시 "" 공백으로 처리)
+
+        public string Data; // 그 외에 필요 정보를 담는 곳 (필요 없을 시 "" 공백으로 처리)
+
+        [JsonConstructor] // 생성자 여러개일 때, Json 파싱 시 해당 생성자를 사용하도록 설정
+        public C2S_RoomCmd()
+        {
+            // Json 파싱 전용 생성자
+        }
+
+        public C2S_RoomCmd(RoomActionType roomActionType, string roomName, string data)
+        {
+            this.Type = (int)PacketType.C2S_RoomCmd;
+
+            this.RoomActionType = (int)roomActionType;
+
+            this.RoomName = roomName ?? "";
+            this.Data = data ?? "";
+        }
+
+        public C2S_RoomCmd(RoomActionType roomActionType, string roomName) : this(roomActionType, roomName, "") { }
+
+        public C2S_RoomCmd(RoomActionType roomActionType) : this(roomActionType, "", "") { }
+    }
+
+    public class S2C_RoomChat : Packet
+    {
+        public string RoomName { get; private set; }
+
+        public string Sender { get; private set; }
+        public string Text { get; private set; }
+
+        public S2C_RoomChat(string roomName, string sender, string text)
+        {
+            this.Type = (int)PacketType.S2C_RoomChat;
+
+            this.RoomName = roomName;
+
+            this.Sender = sender;
+            this.Text = text;
         }
     }
 }

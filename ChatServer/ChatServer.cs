@@ -1,10 +1,9 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ServerCore;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-
-using ServerCore;
 
 namespace ChatServer
 {
@@ -13,7 +12,7 @@ namespace ChatServer
         private static readonly object _lockObj = new object(); // lock 키워드용
 
         private static Dictionary<string, Socket> connectUsers = new Dictionary<string, Socket>();
-        private static Dictionary<string, string> replyTargets = new Dictionary<string, string>();
+        private static Dictionary<string, string> linkRoomUsers = new Dictionary<string, string>();
 
         public static void Main() // ChatServer 프로젝트 메인 함수
         {
@@ -48,6 +47,10 @@ namespace ChatServer
 
         private static void HandleClient(Socket clientSock) // 클라이언트와 통신할때 사용하는 함수
         {
+            // 0. 디버그
+            int threadId = Thread.CurrentThread.ManagedThreadId;
+            Console.WriteLine($"[Thread-{threadId}] 클라이언트와 통신할 스레드가 할당되었습니다.");
+
             using (clientSock) // 안전하게 통신을 종료하기 위한 using 키워드
             {
                 string? username = null;
@@ -59,31 +62,43 @@ namespace ChatServer
                     while (isOpened == true)
                     {
                         // 1. 클라이언트에게 패킷 받기
-                        byte[] buffer = new byte[1024]; // 데이터를 받을 버퍼 생성
+                        byte[] buffer = new byte[2048]; // 데이터를 받을 버퍼 생성
                         int receiveCount = clientSock.Receive(buffer); // 클라이언트 소켓에서 전송받은 크기
                         string data = Encoding.UTF8.GetString(buffer, 0, receiveCount);
 
                         // 2. Json 파일 형식으로 (임시)변환
                         JObject obj = JObject.Parse(data);
-                        int type = obj["Type"].Value<int>(); // 패킷 종류를 알기 위해 Type 부분 파싱
-
-                        // 3. 패킷 종류에 따라 처리
-                        switch ((PacketType) type)
+                        
+                        try
                         {
-                            case PacketType.C2S_Login: // 로그인 요청
-                                username = HandleLogin(clientSock, data, username); // 성공적으로 로그인하였을 경우, 닉네임 반환
-                                break;
+                            int type = obj["Type"].Value<int>(); // 패킷 종류를 알기 위해 Type 부분 파싱
 
-                            case PacketType.C2S_Chat: // 채팅 전송
-                                HandleChat(username, data);
-                                break;
+                            // 3. 패킷 종류에 따라 처리
+                            switch ((PacketType)type)
+                            {
+                                case PacketType.C2S_Login: // 로그인 요청
+                                    username = HandleLogin(clientSock, data, username); // 성공적으로 로그인하였을 경우, 닉네임 반환
+                                    break;
 
-                            case PacketType.C2S_Cmd: // 명령어 입력
-                                HandleCommand(clientSock, username, data);
-                                break;
+                                case PacketType.C2S_Chat: // 채팅 전송
+                                    HandleChat(username, data);
+                                    break;
 
-                            default: // 잘못된 패킷
-                                break;
+                                case PacketType.C2S_Cmd: // 명령어 입력
+                                    HandleCommand(clientSock, username, data);
+                                    break;
+
+                                case PacketType.C2S_RoomCmd: // /방 명령어 입력
+                                    HandleRoomCommand(clientSock, username, data);
+                                    break;
+
+                                default: // 잘못된 패킷
+                                    break;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // int type = obj["Type"].Value<int>(); 부분에서 에러가 떠도 서버가 끊기지 않도록 무시
                         }
 
                     } // while 문
@@ -98,14 +113,18 @@ namespace ChatServer
                 {
                     lock (_lockObj) // 로그아웃 처리
                     {
+                        // a. 유저의 최근 답장 기록 삭제
+                        Command.RemoveReplyTarget(username);
+
+                        if (linkRoomUsers.ContainsKey(username) == true)
+                        {
+                            linkRoomUsers.Remove(username);
+                        }
+
+                        // b. 연결된 유저 명단에서 삭제
                         if (connectUsers.ContainsKey(username) == true)
                         {
                             connectUsers.Remove(username);
-                        }
-
-                        if (replyTargets.ContainsKey(username) == true)
-                        {
-                            replyTargets.Remove(username);
                         }
                     }
 
@@ -179,8 +198,27 @@ namespace ChatServer
 
             if (result == null || username == null) return; // 아닐 경우, 리턴
 
-            // 2. 받은 메세지를 모든 유저에게 전송
-            BroadCast(username, result.Text);
+            string targetRoom = "";
+            bool isRoomChat = false;
+
+            lock (_lockObj)
+            {
+                if (linkRoomUsers.ContainsKey(username) == true)
+                {
+                    targetRoom = linkRoomUsers[username];
+                    isRoomChat = true;
+                }
+            }
+
+            // 2. 현재 메세지 대상이 전체인지, 방인지 확인
+            if (isRoomChat == false)
+            {
+                BroadCast(username, result.Text);
+            }
+            else
+            {
+                RoomCast(targetRoom, username, result.Text);
+            }
         }
 
         private static void HandleCommand(Socket clientSock, string? username, string data) // 입력한 명령어를 실행시켜주는 함수
@@ -190,20 +228,21 @@ namespace ChatServer
 
             if (result == null || username == null) return; // 아닐 경우, 리턴
 
+            // 2. 명령어 타입에 맞게 함수 실행
             switch (result.Command)
             {
                 case "list": // /list, /l, /ㅣ, /목록 명령어
                 case "l":
                 case "ㅣ":
                 case "목록":
-                    ListCommand(clientSock);
+                    Command.ListCommand(clientSock);
                     break;
 
                 case "help": // /help, /h, /ㅗ, /도움말 명령어
                 case "h":
                 case "ㅗ":
                 case "도움말":
-                    HelpCommand(clientSock);
+                    Command.HelpCommand(clientSock);
                     break;
 
                 case "whisper": // /whisper, /w, /ㅈ, /귓, /귓속말 명령어
@@ -211,18 +250,97 @@ namespace ChatServer
                 case "ㅈ":
                 case "귓":
                 case "귓속말":
-                    WhisperCommand(clientSock, username, result.Args);
+                    Command.WhisperCommand(clientSock, username, result.Args);
                     break;
 
                 case "reply": // /reply, /r, /ㄱ, /답장 명령어
                 case "r":
                 case "ㄱ":
                 case "답장":
-                    ReplyCommand(clientSock, username, result.Args);
+                    Command.ReplyCommand(clientSock, username, result.Args);
                     break;
 
                 default:
-                    UnknownCommand(clientSock);
+                    Command.UnknownCommand(clientSock);
+                    break;
+            }
+        }
+
+        private static void HandleRoomCommand(Socket clientSock, string? username, string data) // /방 명령어 입력
+        {
+            // 1. 방 명령어 형식으로 패킷 데이터 파싱
+            C2S_RoomCmd? result = JsonConvert.DeserializeObject<C2S_RoomCmd>(data);
+
+            if (result == null || username == null) return; // 아닐 경우, 리턴
+
+            // 2. 명령어 타입에 맞게 함수 실행
+            switch ((RoomActionType)result.RoomActionType)
+            {
+                case RoomActionType.Help:
+                    RoomCommand.HelpCommand(clientSock);
+                    break;
+
+                case RoomActionType.Accept:
+                    RoomCommand.DecisionCommand(clientSock, username, true);
+                    break;
+
+                case RoomActionType.Deny:
+                    RoomCommand.DecisionCommand(clientSock, username, false);
+                    break;
+
+                case RoomActionType.List:
+                    RoomCommand.ListCommand(clientSock);
+                    break;
+
+                case RoomActionType.ToggleChat:
+                    RoomCommand.ToggleChatCommand(clientSock, username, result.RoomName);
+                    break;
+
+                case RoomActionType.Chat:
+                    RoomCommand.ChatCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.Info:
+                    RoomCommand.InfoCommand(clientSock, username, result.RoomName);
+                    break;
+                case RoomActionType.Create:
+                    RoomCommand.CreateCommand(clientSock, username, result.RoomName);
+                    break;
+
+                case RoomActionType.Members:
+                    RoomCommand.MembersCommand(clientSock, username, result.RoomName);
+                    break;
+
+                case RoomActionType.Join:
+                    RoomCommand.JoinCommand(clientSock, username, result.RoomName);
+                    break;
+
+                case RoomActionType.Quit:
+                    RoomCommand.QuitCommand(clientSock, username, result.RoomName);
+                    break;
+
+                case RoomActionType.Invite:
+                    RoomCommand.InviteCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.Kick:
+                    RoomCommand.KickCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.Privacy:
+                    RoomCommand.PrivacyCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.Delegate:
+                    RoomCommand.DelegateCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.SetTopic:
+                    RoomCommand.SetTopicCommand(clientSock, username, result.RoomName, result.Data);
+                    break;
+
+                case RoomActionType.Rename:
+                    RoomCommand.RenameCommand(clientSock, username, result.RoomName, result.Data);
                     break;
             }
         }
@@ -263,175 +381,93 @@ namespace ChatServer
 
             ChatLogger.SaveLog($"[{sender}] {message}"); // 서버에 메세지 로그 기록
         }
+    
+        internal static void RoomCast(string roomName, string sender, string message)
+        {
+            // 1. 방 채팅 형식으로 전달
+            S2C_RoomChat result = new S2C_RoomChat(roomName, sender, message);
 
-        private static void ListCommand(Socket clientSock) // 현재 접속 중인 유저 명단을 확인하는 명령어
+            string json = JsonConvert.SerializeObject(result);
+            byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+            List<string> members = RoomCommand.GetRoomMembers(roomName);
+            lock (_lockObj)
+            {
+                // 2. 연결된 모든 멤버에게 패킷 전송
+                foreach (string member in members)
+                {
+                    Socket? memberSock = GetConnectUserSocket(member);
+
+                    if (memberSock == null) continue;
+
+                    try
+                    {
+                        memberSock.Send(buffer);
+                    }
+                    catch (SocketException ex)
+                    {
+                        // 전송 실패(도중에 연결 끊김)
+                    }
+                }
+            } // lock 키워드
+
+            ChatLogger.SaveLog($"[{roomName}] [{sender}] {message}");
+        }
+
+        internal static Socket? GetConnectUserSocket(string username)
         {
             lock (_lockObj)
             {
-                StringBuilder text = new StringBuilder();
-                text.Append($"현재 접속 중인 유저 [{connectUsers.Count}명] :\n");
+                if (connectUsers.ContainsKey(username) == false) return null;
 
-                // 현재 접속 중인 유저 닉네임을 알파벳 순으로 정렬
-                List<string> sortedUsers = connectUsers.Keys.OrderBy(u => u, StringComparer.OrdinalIgnoreCase) // 대소문자 무시하고 알파벳순 정렬
-                                                      .ThenBy(u => u, StringComparer.Ordinal) // 스펠링이 같으면 대문자 우선 정렬
-                                                      .ToList();
-
-                text.AppendJoin(", ", sortedUsers); // 정렬된 닉네임을 메세지로 추가
-
-                S2C_Chat packet = new S2C_Chat("시스템", text.ToString());
-                string json = JsonConvert.SerializeObject(packet);
-                byte[] buffer = Encoding.UTF8.GetBytes(json);
-
-                clientSock.Send(buffer);
+                return connectUsers[username];
             }
         }
 
-        private static void HelpCommand(Socket clientSock) // 사용 가능한 명령어를 알려주는 명령어
+        internal static List<string> GetConnectUserList()
         {
-            StringBuilder text = new StringBuilder();
-            text.Append("사용 가능한 명령어를 확인합니다.\n\n");
-            text.Append("= = = = = = 명령어 = = = = = =\n");
-            text.Append("/exit - 서버와의 연결을 끊습니다. (/e, /ㄷ, /나가기)\n");
-            text.Append("/help - 사용 가능한 명령어 확인 (/h, /ㅗ, /도움말)\n");
-            text.Append("/list - 현재 접속 중인 유저 명단을 확인 (/l, /ㅣ, /목록)\n");
-            text.Append("/reply <메세지> - 가장 최근에 대화한 대상에게만 보이는 메세지 전송 (/r, /ㄱ, /답장)\n");
-            text.Append("/whisper <대상> <메세지> - 대상만 보이는 메세지 전송 (/w, /ㅈ, /귓속말)\n");
-            text.Append("= = = = = = = = = = = = = = =\n\n");
-
-            S2C_Chat packet = new S2C_Chat("시스템", text.ToString());
-            string json = JsonConvert.SerializeObject(packet);
-            byte[] buffer = Encoding.UTF8.GetBytes(json);
-
-            clientSock.Send(buffer);
+            lock (_lockObj)
+            {
+                return connectUsers.Keys.ToList();
+            }
         }
 
-        private static void WhisperCommand(Socket clientSock, string username, string[] args) // 대상에게 귓속말을 전송해주는 명령어
+        internal static bool ToggleLinkRoomUsers(string username, string roomName)
         {
-            Packet packet;
-            string json;
-            byte[] buffer;
-
-            if (args.Length <= 1) // 인자가 <대상>, <메시지>만큼 존재하지 않을 경우
+            lock (_lockObj)
             {
-                packet = new S2C_Chat("시스템", "잘못된 명령어입니다. (/w <대상> <메세지>)");
-            }
-            else // 인자가 정상적으로 존재할 경우
-            {
-                string target = args[0]; // 대화 대상
-
-                lock (_lockObj)
+                if (linkRoomUsers.ContainsKey(username) == true)
                 {
-                    if (connectUsers.ContainsKey(target) == false) // 대상이 존재하지 않을 경우
+                    if (linkRoomUsers[username] == roomName) // 이미 해당 방 채팅 토글 상태였을 경우
                     {
-                        packet = new S2C_Chat("시스템", "대상을 찾을 수 없습니다.");
+                        linkRoomUsers.Remove(username);
+
+                        return false;
                     }
-                    else // 대상이 존재할 경우
-                    {
-                        // 1. 대상과 유저의 최근 대화 대상 업데이트
-                        replyTargets[username] = target;
-                        replyTargets[target] = username;
+                }
 
-                        string text = string.Join(" ", args.Skip(1));
+                // 그 외의 상태였을 경우(전체 채팅 / 다른 방 채팅 토글)
 
-                        // 2. 대상에게 귓속말 패킷 전송
+                linkRoomUsers[username] = roomName;
 
-                        packet = new S2C_Whisper(username, text, false);
-
-                        json = JsonConvert.SerializeObject(packet);
-                        buffer = Encoding.UTF8.GetBytes(json);
-
-                        try
-                        {
-                            connectUsers[target].Send(buffer);
-                        }
-                        catch (SocketException ex)
-                        {
-                            // 대상이 도중에 접속이 끊겨 생긴 오류로 유저가 쓰레드에서 탈출되지 않도록 방지
-                        }
-
-                        // 3. 자신에게 귓속말 패킷 전송
-                        packet = new S2C_Whisper(target, text, true);
-
-                        // 4. 서버 로그
-                        ChatLogger.SaveLog($"[{username} >> {target}] {text}");
-                    }
-                } // lock 키워드
+                return true;
             }
-
-            json = JsonConvert.SerializeObject(packet);
-            buffer = Encoding.UTF8.GetBytes(json);
-
-            clientSock.Send(buffer);
         }
 
-        private static void ReplyCommand(Socket clientSock, string username, string[] args) // 가장 최근 대화를 주고받은 대상에게 귓속말을 전송해주는 명령어
+        internal static void RenameLinkRoomUsers(string oldname, string newname)
         {
-            Packet packet;
-            string json;
-            byte[] buffer;
+            lock (_lockObj)
+            {
+                List<string> users = linkRoomUsers.Keys.ToList();
 
-            if (args.Length == 0) // 인자가 존재하지 않을 경우
-            {
-                packet = new S2C_Chat("시스템", "잘못된 명령어입니다. (/r <메세지>)");
-            }
-            else
-            {
-                lock (_lockObj)
+                foreach (string user in users)
                 {
-                    if (replyTargets.ContainsKey(username) == false) // 유저와 최근에 대화한 대상이 없을 경우
+                    if (linkRoomUsers[user].Equals(oldname) == true)
                     {
-                        packet = new S2C_Chat("시스템", "최근에 대화한 유저가 없습니다.");
+                        linkRoomUsers[user] = newname;
                     }
-                    else if (connectUsers.ContainsKey(replyTargets[username]) == false) // 최근에 대화한 대상을 찾을 수 없을 경우
-                    {
-                        packet = new S2C_Chat("시스템", "대상을 찾을 수 없습니다.");
-                    }
-                    else // 최근에 대화한 대상이 존재할 경우
-                    {
-                        string target = replyTargets[username];
-
-                        // 1. 대상과 유저의 최근 대화대상 업데이트
-                        replyTargets[target] = username;
-
-                        string text = string.Join(" ", args);
-
-                        // 2. 대상에게 귓속말 패킷 전송
-                        packet = new S2C_Whisper(username, text, false);
-
-                        json = JsonConvert.SerializeObject(packet);
-                        buffer = Encoding.UTF8.GetBytes(json);
-
-                        try
-                        {
-                            connectUsers[target].Send(buffer);
-                        }
-                        catch (SocketException ex)
-                        {
-                            // 대상이 도중에 접속이 끊겨 생긴 오류로 유저가 쓰레드에서 탈출되지 않도록 방지
-                        }
-
-                        // 3. 자신에게 귓속말 패킷 전송
-                        packet = new S2C_Whisper(target, text, true);
-
-                        // 4. 서버 로그
-                        ChatLogger.SaveLog($"[{username} >> {target}] {text}");
-                    }
-                } // lock 키워드
-            }
-
-            json = JsonConvert.SerializeObject(packet);
-            buffer = Encoding.UTF8.GetBytes(json);
-
-            clientSock.Send(buffer);
-        }
-
-        private static void UnknownCommand(Socket clientSock) // 잘못된 명령어
-        {
-            S2C_Chat packet = new S2C_Chat("시스템", "존재하지 않는 명령어입니다. (/h)");
-            string json = JsonConvert.SerializeObject(packet);
-            byte[] buffer = Encoding.UTF8.GetBytes(json);
-
-            clientSock.Send(buffer);
+                }
+            } // lock 키워드
         }
     }
 }
